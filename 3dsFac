@@ -1,0 +1,105 @@
+<?php
+if (!isset($_SESSION)) {
+    session_start();
+}
+$_SESSION['last_activity'] = time();
+if (!(isset($_SESSION['user_type']) && $_SESSION['user_type'] == 'parent')) {
+    header("Location: ../parent-signin.php");
+    exit();
+}
+if (empty($_SESSION['AppUserID'])) {
+    header("Location: ../parent-signin.php");
+    exit();
+}
+
+/* ======================================================================================
+ * FAC Merchant Integration
+ * XML POST Service
+ * --------------------------------------------------------------------------------------
+ * In common.php, replace MerchantId and ProcessingPassword with values provided to you
+ * by FAC Support team
+ * --------------------------------------------------------------------------------------
+ * To troubleshoot, save request and response bodies in files and forward to FAC Support
+ * ====================================================================================== */
+
+require_once('../inc.config.php');
+require_once(_ROOT_PATH_ . '/config/AppManager.php');
+require_once(_ROOT_PATH_ . '/payment/class.payment.php');
+require_once(_ROOT_PATH_ . '/system_mail/send_receipt.php');
+require_once(_ROOT_PATH_ . '/credit_card/class.creditcard.php');
+
+$Payment = new Payment();
+
+require_once('common.php');
+require_once('authorize.php');
+
+$ParentId = $_SESSION['AppUserID'];
+$parent_results = $pm->run("SELECT * FROM parent WHERE id='$ParentId'");
+$ParentFullname = $parent_results[0]['FirstName'] . " " . $parent_results[0]['LastName'];
+$ParentEmail = $parent_results[0]['EmailAddress'];
+
+$_SESSION['FAC_OrderNumber'] = null;
+
+$NameOnCard = !empty($_POST['NameOnCard']) ? $_POST['NameOnCard'] : null;
+$AccountNumber = !empty($_POST['AccountNumber']) ? $_POST['AccountNumber'] : null;
+$checkoutYear = !empty($_POST['checkout-year']) ? $_POST['checkout-year'] : null;
+$checkoutMonth = !empty($_POST['checkout-month']) ? $_POST['checkout-month'] : null;
+$expiry = $checkoutMonth . $checkoutYear;
+$cvv2 = !empty($_POST['card-code']) ? $_POST['card-code'] : null;
+
+$orderNumber = $_SESSION['PaymentDetails']['OrderNumber'];
+
+$PaymentRecord = $Payment->get_payments_records($orderNumber);
+if (!empty($PaymentRecord) && count($PaymentRecord) > 0) {
+    $_SESSION['PaymentError'] = "Order Number already exist. Please try again";
+    header("Location:../checkout.php");
+    exit();
+}
+
+$GCT = !empty($_SESSION['PaymentDetails']['GCT']) ? $_SESSION['PaymentDetails']['GCT'] : null;
+$GCT_PERCENTAGE = !empty($_SESSION['PaymentDetails']['GCT_PERCENTAGE']) ? $_SESSION['PaymentDetails']['GCT_PERCENTAGE'] : null;
+$OUR_FEE = !empty($_SESSION['PaymentDetails']['OUR_FEE']) ? $_SESSION['PaymentDetails']['OUR_FEE'] : null;
+$SPS_CURRENCY = !empty($_SESSION['PaymentDetails']['SPS_CURRENCY']) ? $_SESSION['PaymentDetails']['SPS_CURRENCY'] : null;
+$SPS_CURRENCY_CODE = !empty($_SESSION['PaymentDetails']['SPS_CURRENCY_CODE']) ? $_SESSION['PaymentDetails']['SPS_CURRENCY_CODE'] : null;
+$subTotal = !empty($_SESSION['PaymentDetails']['SUB_TOTAL']) ? $_SESSION['PaymentDetails']['SUB_TOTAL'] : null;
+$grandTotal = !empty($_SESSION['PaymentDetails']['GRAND_TOTAL']) ? $_SESSION['PaymentDetails']['GRAND_TOTAL'] : null;
+
+$card = CreditCard::validCreditCard($AccountNumber);
+if ($card['valid']) {
+    $cardType = $card['type'];
+    $CardLastDigit = $card['mask'];
+    $validCvc = CreditCard::validCvc($cvv2, $cardType);
+    $validDate = CreditCard::validDate('20' . $checkoutYear, $checkoutMonth);
+    if (($validCvc == true && $validDate == true) && ($cardType == 'visa' || $cardType == 'mastercard')) {
+
+        $PaymentId = $Payment->addTransactionDetails($_SESSION['JsonDecoded'], $orderNumber, $subTotal, $GCT, $GCT_PERCENTAGE, $cardType, $TrxnType = 'Authorize3DSCapture', $OUR_FEE, $SPS_CURRENCY, $SPS_CURRENCY_CODE,$NameOnCard,$CardLastDigit); // should be checked payment details
+        $paymentDetailsResults = $pm->run("SELECT * FROM payment_details WHERE PaymentId='$PaymentId'");
+        if (!empty($paymentDetailsResults) && count($paymentDetailsResults) > 0) {
+            Authorize3DS($AccountNumber, $orderNumber, $grandTotal, $SPS_CURRENCY_CODE, $expiry, $cvv2);
+        } else {
+            $_SESSION['PaymentError'] = "System error. Please try again later.";
+            header("Location:../checkout.php");
+            exit();
+        }
+    } else {
+        $_SESSION['PaymentError'] = "Invalid CVV or Expiration Date.";
+        header("Location:../checkout.php");
+        exit();
+    }
+} else {
+    $_SESSION['PaymentError'] = "Invalid card.";
+    header("Location:../checkout.php");
+    exit();
+}
+
+
+function checkVal($field)
+{
+    global $result;
+    if (!empty($result->CreditCardTransactionResults->$field)) {
+        return $result->CreditCardTransactionResults->$field;
+    } else {
+        return null;
+    }
+}
+
